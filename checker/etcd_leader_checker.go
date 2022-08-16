@@ -9,15 +9,16 @@ import (
 	"log"
 	"time"
 
+	//"github.com/coreos/etcd/clientv3"
+	clientv3 "go.etcd.io/etcd/client/v3"
 	"github.com/cybertec-postgresql/vip-manager/vipconfig"
-	client "go.etcd.io/etcd/client/v3"
 )
 
 // EtcdLeaderChecker is used to check state of the leader key in Etcd
 type EtcdLeaderChecker struct {
 	key      string
 	nodename string
-	kapi     client.KV
+	conn     *clientv3.Client
 }
 
 //naming this c_conf to avoid conflict with conf in etcd_leader_checker.go
@@ -58,6 +59,7 @@ func getTransport(conf *vipconfig.Config) (*tls.Config, error) {
 		}
 	}
 
+	// TODO: make these timeouts adjustable
 	return tlsClientConfig, nil
 }
 
@@ -66,32 +68,30 @@ func NewEtcdLeaderChecker(con *vipconfig.Config) (*EtcdLeaderChecker, error) {
 	eConf = con
 	e := &EtcdLeaderChecker{key: eConf.Key, nodename: eConf.Nodename}
 
-	tlsConfig, err := getTransport(eConf)
+	transport, err := getTransport(eConf)
 	if err != nil {
 		return nil, err
 	}
 
-	cfg := client.Config{
-		Endpoints:            eConf.Endpoints,
-		TLS:                  tlsConfig,
-		DialKeepAliveTimeout: time.Second,
-		Username:             eConf.EtcdUser,
-		Password:             eConf.EtcdPassword,
+	cfg := clientv3.Config{
+		Endpoints:               eConf.Endpoints,
+		TLS:               transport,
+		DialTimeout: 10 * time.Second,
 	}
-	c, err := client.New(cfg)
+	c, err := clientv3.New(cfg)
 	if err != nil {
 		return nil, err
 	}
-	e.kapi = c.KV
+	e.conn = c
 	return e, nil
 }
 
 // GetChangeNotificationStream checks the status in the loop
 func (e *EtcdLeaderChecker) GetChangeNotificationStream(ctx context.Context, out chan<- bool) error {
-	var state bool
+
 checkLoop:
 	for {
-		resp, err := e.kapi.Get(ctx, e.key)
+		resp, err := e.conn.Get(ctx, e.key )
 
 		if err != nil {
 			if ctx.Err() != nil {
@@ -102,10 +102,15 @@ checkLoop:
 			time.Sleep(time.Duration(eConf.Interval) * time.Millisecond)
 			continue
 		}
+		//log.Printf("Key is s %s \n Value is %s \n", resp.Kvs[0].Key, resp.Kvs[0].Value)
 
-		for _, kv := range resp.Kvs {
-			state = string(kv.Value) == e.nodename
-		}
+		var lastValue string
+   		for _, kv := range resp.Kvs {
+			//log.Printf("Get {%s:%s} \n", kv.Key, kv.Value)
+        		lastValue = string(kv.Value)
+			continue
+    		}
+		state := lastValue == e.nodename
 
 		select {
 		case <-ctx.Done():
